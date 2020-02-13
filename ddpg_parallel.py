@@ -27,11 +27,12 @@ parser.add_argument(
     help='interval between training status logs (default: 10)')
 args = parser.parse_args()
 
-episodes = 5000
+# episodes = 5000
 episodes = 1500
 episode_length = 1000
 render_interval = 500
-memory_size = 10*episode_length
+memory_size = 50*episode_length
+num_workers = 8
 
 h=512
 intermediate_layer=False
@@ -119,8 +120,26 @@ class Memory():
         return np.random.choice(self.memory, batch_size)
 
 
-class Agent():
+class Actor()
+    def __init__(self, learner):
+        self.eval_anet = learner.eval_anet.float()
 
+    def select_action(self, state):
+        # state = torch.from_numpy(state).float().unsqueeze(0)
+        state = torch.from_numpy(state).float()
+        mu = self.eval_anet(state)
+        dist = Normal(mu, torch.tensor(self.var, dtype=torch.float))
+        action = dist.sample()
+        action.clamp(-2.0, 2.0)
+        return action.numpy()
+
+def worker(learner):
+    agent = Actor()
+    steps = 0
+
+
+
+class Learner():
     max_grad_norm = 0.5
 
     def __init__(self):
@@ -135,7 +154,7 @@ class Agent():
         self.trans_model = TransitionNet().float()
         self.optimizer_t = optim.Adam(self.trans_model.parameters(), lr=1e-3)
         self.use_penalty = False
-
+        # return (action.item(),)
     def select_action(self, state):
         # state = torch.from_numpy(state).float().unsqueeze(0)
         state = torch.from_numpy(state).float()
@@ -144,7 +163,6 @@ class Agent():
         action = dist.sample()
         action.clamp(-2.0, 2.0)
         return action.numpy()
-        # return (action.item(),)
 
     def save_param(self, suffix=''):
         torch.save(self.trans_model.state_dict(), 'param/ddpg_transmodel_params'+ suffix+'.pkl')
@@ -186,7 +204,6 @@ class Agent():
         self.optimizer_t.step()
 
         grad_penalty = 0
-        epsilon = 10**(-9)
         if self.use_penalty:
             epsilon = 10**(-9)
             new_state = self.trans_model(s, self.eval_anet(s))
@@ -200,19 +217,6 @@ class Agent():
             grad_norms = torch.stack(grad_norms)
             grad_penalty = epsilon*grad_norms
 
-        state_penalty = False
-        if state_penalty:
-            perturbation = torch.zeros_like(s, requires_grad=True)
-            optimizer_p = optim.SGD(perturbation, lr=1e-4)
-            new_values = self.eval_cnet(s_ + perturbation, self.eval_anet(s_ + perturbation))
-            grad_norms = [] 
-            for val in new_values:
-                optimizer_p.zero_grad()
-                val.backward(retain_graph=True)
-                norm = torch.sum(perturbation.grad**2)**.5
-                grad_norms.append(norm)
-            grad_norms = torch.stack(grad_norms)
-            grad_penalty = epsilon*grad_norms
 
         # update actor net
         self.optimizer_a.zero_grad()
@@ -230,13 +234,17 @@ class Agent():
 
         return q_eval.mean().item()
 
-def train(agent=None, load=False, save = True, penalty=False):
-    env.seed(args.seed)
+def train(agent, load=False, save = True, penalty=False):
+    if task == 'pendulum':
+        env = gym.make('Pendulum-v0')
+        state_dim = 3
+        action_dim = 1
+    elif task == 'walker':
+        env = gym.make('Walker2d-v2')
+        state_dim = 17
+        action_dim = 6
 
-    if agent == None:
-        agent = Agent()
-        if load: 
-            agent.load_param()
+    env.seed(args.seed)
 
     training_records = []
     # running_reward, running_q = -1000, 0
@@ -277,7 +285,6 @@ def train(agent=None, load=False, save = True, penalty=False):
     plt.ylabel('Moving averaged episode reward')
     plt.savefig("img/ddpg.png")
     plt.show()
-    return agent
 
 
 def render_ep(n=1):
@@ -293,13 +300,12 @@ def render_ep(n=1):
 
 
 def main():
-    agent = train(load=False, save = True, penalty=False)
+    train(new_agent=True, load=False, save = True, penalty=False)
     render_ep(5)
     episodes=500
-    train(agent=agent, load=True, save = False, penalty=False)
-    render_ep(5)
-    train(agent=agent, load=True, save = False, penalty=True)
-    render_ep(5)
+    train(load=True, save = False, penalty=False)
+    # render_ep(5)
+    train(load=True, save = False, penalty=True)
 
 if __name__ == '__main__':
     main()

@@ -15,7 +15,7 @@ import pdb
 
 parser = argparse.ArgumentParser(description='Solve the Pendulum-v0 with DDPG')
 parser.add_argument(
-    '--gamma', type=float, default=0.95, metavar='G', help='discount factor (default: 0.9)')
+    '--gamma', type=float, default=0.99, metavar='G', help='discount factor (default: 0.9)')
 
 parser.add_argument('--seed', type=int, default=0, metavar='N', help='random seed (default: 0)')
 parser.add_argument('--render', action='store_true', help='render the environment')
@@ -28,13 +28,12 @@ parser.add_argument(
 args = parser.parse_args()
 
 episodes = 5000
-episodes = 1500
 episode_length = 1000
 render_interval = 500
 memory_size = 10*episode_length
 
 h=512
-intermediate_layer=False
+intermediate_layer=True
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
@@ -66,7 +65,8 @@ class ActorNet(nn.Module):
         x = F.relu(self.fc(s))
         if intermediate_layer:
             x = F.dropout(F.relu(F.dropout(self.l2(x), p=.1)), p=.1)
-        u = 2.0 * F.tanh(self.mu_head(x))
+        # u = 2.0 * F.tanh(self.mu_head(x))
+        u = F.tanh(self.mu_head(x))
         return u
 
 
@@ -125,36 +125,32 @@ class Agent():
 
     def __init__(self):
         self.training_step = 0
+        # self.var = 1.
         self.var = 1.
-        self.eval_cnet, self.target_cnet = CriticNet().float(), CriticNet().float()
-        self.eval_anet, self.target_anet = ActorNet().float(), ActorNet().float()
+        self.eval_cnet, self.target_cnet = CriticNet().float().cuda(), CriticNet().float().cuda()
+        self.eval_anet, self.target_anet = ActorNet().float().cuda(), ActorNet().float().cuda()
         self.memory = Memory(memory_size)
         self.optimizer_c = optim.Adam(self.eval_cnet.parameters(), lr=1e-3)
         self.optimizer_a = optim.Adam(self.eval_anet.parameters(), lr=3e-4)
 
         self.trans_model = TransitionNet().float()
         self.optimizer_t = optim.Adam(self.trans_model.parameters(), lr=1e-3)
-        self.use_penalty = False
 
     def select_action(self, state):
         # state = torch.from_numpy(state).float().unsqueeze(0)
-        state = torch.from_numpy(state).float()
+        state = torch.from_numpy(state).float().cuda()
         mu = self.eval_anet(state)
-        dist = Normal(mu, torch.tensor(self.var, dtype=torch.float))
+        dist = Normal(mu, torch.tensor(self.var, dtype=torch.float).cuda())
         action = dist.sample()
-        action.clamp(-2.0, 2.0)
-        return action.numpy()
+        # action.clamp(-2.0, 2.0)
+        action.clamp(-1.0, 1.0)
+        return action.cpu().numpy()
         # return (action.item(),)
 
-    def save_param(self, suffix=''):
-        torch.save(self.trans_model.state_dict(), 'param/ddpg_transmodel_params'+ suffix+'.pkl')
-        torch.save(self.eval_anet.state_dict(), 'param/ddpg_anet_params'+ suffix+'.pkl')
-        torch.save(self.eval_cnet.state_dict(), 'param/ddpg_cnet_params'+ suffix+'.pkl')
-
-    def load_param(self, suffix=''):
-        self.trans_model.load_state_dict(torch.load('param/ddpg_transmodel_params'+ suffix+'.pkl'))
-        self.eval_anet.load_state_dict(torch.load('param/ddpg_anet_params'+ suffix+'.pkl'))
-        self.eval_cnet.load_state_dict(torch.load('param/ddpg_cnet_params'+ suffix+'.pkl'))
+    def save_param(self):
+        torch.save(self.trans_model.state_dict(), 'param/ddpg_transmodel_params.pkl')
+        torch.save(self.eval_anet.state_dict(), 'param/ddpg_anet_params.pkl')
+        torch.save(self.eval_cnet.state_dict(), 'param/ddpg_cnet_params.pkl')
 
     def store_transition(self, transition):
         self.memory.update(transition)
@@ -163,10 +159,10 @@ class Agent():
         self.training_step += 1
 
         transitions = self.memory.sample(32)
-        s = torch.tensor([t.s for t in transitions], dtype=torch.float)
-        a = torch.tensor([t.a for t in transitions], dtype=torch.float).view(-1, action_dim)
-        r = torch.tensor([t.r for t in transitions], dtype=torch.float).view(-1, 1)
-        s_ = torch.tensor([t.s_ for t in transitions], dtype=torch.float)
+        s = torch.tensor([t.s for t in transitions], dtype=torch.float).cuda()
+        a = torch.tensor([t.a for t in transitions], dtype=torch.float).view(-1, action_dim).cuda()
+        r = torch.tensor([t.r for t in transitions], dtype=torch.float).view(-1, 1).cuda()
+        s_ = torch.tensor([t.s_ for t in transitions], dtype=torch.float).cuda()
 
         with torch.no_grad():
             q_target = r + args.gamma * self.target_cnet(s_, self.target_anet(s_))
@@ -180,14 +176,14 @@ class Agent():
         self.optimizer_c.step()
 
         # update transition net
-        self.optimizer_t.zero_grad()
-        t_loss = F.mse_loss(self.trans_model(s, a), s_)
-        t_loss.backward()
-        self.optimizer_t.step()
+        # self.optimizer_t.zero_grad()
+        # t_loss = F.mse_loss(self.trans_model(s, a), s_)
+        # t_loss.backward()
+        # self.optimizer_t.step()
 
+        use_penalty = False
         grad_penalty = 0
-        epsilon = 10**(-9)
-        if self.use_penalty:
+        if use_penalty:
             epsilon = 10**(-9)
             new_state = self.trans_model(s, self.eval_anet(s))
             new_values = self.eval_cnet(new_state, self.eval_anet(new_state))
@@ -200,19 +196,6 @@ class Agent():
             grad_norms = torch.stack(grad_norms)
             grad_penalty = epsilon*grad_norms
 
-        state_penalty = False
-        if state_penalty:
-            perturbation = torch.zeros_like(s, requires_grad=True)
-            optimizer_p = optim.SGD(perturbation, lr=1e-4)
-            new_values = self.eval_cnet(s_ + perturbation, self.eval_anet(s_ + perturbation))
-            grad_norms = [] 
-            for val in new_values:
-                optimizer_p.zero_grad()
-                val.backward(retain_graph=True)
-                norm = torch.sum(perturbation.grad**2)**.5
-                grad_norms.append(norm)
-            grad_norms = torch.stack(grad_norms)
-            grad_penalty = epsilon*grad_norms
 
         # update actor net
         self.optimizer_a.zero_grad()
@@ -230,13 +213,11 @@ class Agent():
 
         return q_eval.mean().item()
 
-def train(agent=None, load=False, save = True, penalty=False):
+
+def main():
     env.seed(args.seed)
 
-    if agent == None:
-        agent = Agent()
-        if load: 
-            agent.load_param()
+    agent = Agent()
 
     training_records = []
     # running_reward, running_q = -1000, 0
@@ -244,6 +225,7 @@ def train(agent=None, load=False, save = True, penalty=False):
     for i_ep in range(episodes):
         score = 0
         state = env.reset()
+        agent.var = .6/(i_ep+1)**.5 + .4
 
         for t in range(episode_length):
             if i_ep % render_interval == 0 and args.render:
@@ -256,11 +238,9 @@ def train(agent=None, load=False, save = True, penalty=False):
             state = state_
             if agent.memory.isfull:
                 q = agent.update()
-                if running_q ==0: running_q=q
-                else: running_q = 0.99 * running_q + 0.01 * q
+                running_q = 0.99 * running_q + 0.01 * q
 
-        if running_reward == 0: running_reward = score
-        else: running_reward = running_reward * 0.9 + score * 0.1
+        running_reward = running_reward * 0.9 + score * 0.1
         training_records.append(TrainingRecord(i_ep, running_reward))
 
         if i_ep % args.log_interval == 0:
@@ -271,38 +251,15 @@ def train(agent=None, load=False, save = True, penalty=False):
             with open('log/ddpg_training_records.pkl', 'wb') as f:
                 pickle.dump(training_records, f)
 
+    env.close()
+
     plt.plot([r.ep for r in training_records], [r.reward for r in training_records])
     plt.title('DDPG')
     plt.xlabel('Episode')
     plt.ylabel('Moving averaged episode reward')
     plt.savefig("img/ddpg.png")
     plt.show()
-    return agent
 
-
-def render_ep(n=1):
-    for i in range(n):
-        score=0
-        env.reset()
-        for t in range(episode_length):
-            env.render()
-            action = agent.select_action(state)
-            state_, reward, done, _ = env.step(action)
-            score += reward
-        print(score)
-
-
-def main():
-    agent = train(load=False, save = True, penalty=False)
-    render_ep(5)
-    episodes=500
-    train(agent=agent, load=True, save = False, penalty=False)
-    render_ep(5)
-    train(agent=agent, load=True, save = False, penalty=True)
-    render_ep(5)
 
 if __name__ == '__main__':
     main()
-
-
-env.close()
